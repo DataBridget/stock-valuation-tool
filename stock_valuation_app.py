@@ -188,7 +188,9 @@ def calculate_dcf_valuation(net_profit, revenue, eps, growth_rate, discount_rate
     pv_terminal = terminal / ((1 + discount_rate) ** 10)
     total_shares = max(revenue / (eps * 10000), 1) if eps > 0 and revenue > 0 else 1e8
     dcf_value = (pv_fcf + pv_terminal) / total_shares
-    return min(dcf_value, current_price * 5) if current_price > 0 else dcf_value
+    # 限制DCF估值在合理范围（不超过PE基准估值的2倍）
+    pe_base_value = eps * 20
+    return min(dcf_value, pe_base_value * 2) if pe_base_value > 0 else dcf_value
 
 def calculate_pb_valuation(bvps, pb_mult):
     return bvps * pb_mult if bvps > 0 else 0
