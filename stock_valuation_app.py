@@ -62,10 +62,12 @@ def get_stock_list_baostock():
     while rs.error_code == "0" and rs.next():
         row = rs.get_row_data()
         if row[4] == "1":
-            code = row[0][2:].strip().zfill(6)
+            raw_code = row[0].strip()
+            code = raw_code.split('.')[-1].zfill(6) if '.' in raw_code else raw_code.zfill(6)
+            exchange = raw_code[:2] if '.' in raw_code else 'sh'
             stock_list.append({
                 '代码': code, '名称': row[1],
-                '上市日期': row[2], '交易所': row[0][:2]
+                '上市日期': row[2], '交易所': exchange
             })
     bs_logout()
     return pd.DataFrame(stock_list)
@@ -546,10 +548,10 @@ def create_health_gauge(score):
             'bar': {'color': color, 'thickness': 0.7},
             'bgcolor': 'white',
             'steps': [
-                {'range': [0, 40], 'color': '#ff6b6b20'},
-                {'range': [40, 60], 'color': '#feca5720'},
-                {'range': [60, 80], 'color': '#48dbfb20'},
-                {'range': [80, 100], 'color': '#1dd1a120'}
+                {'range': [0, 40], 'color': 'rgba(255,107,107,0.15)'},
+                {'range': [40, 60], 'color': 'rgba(254,202,87,0.15)'},
+                {'range': [60, 80], 'color': 'rgba(72,219,251,0.15)'},
+                {'range': [80, 100], 'color': 'rgba(29,209,161,0.15)'}
             ],
             'threshold': {'line': {'color': color, 'width': 3}, 'thickness': 0.8, 'value': score}
         }
@@ -794,9 +796,15 @@ def main():
     end_date = datetime.now().strftime('%Y-%m-%d')
     start_date = (datetime.now() - timedelta(days=500)).strftime('%Y-%m-%d')
 
-    with st.spinner(f'🔄 正在获取 {stock_name}({symbol}) 的实时数据...'):
+    with st.spinner(f'正在获取 {stock_name}({symbol}) 的实时数据...'):
         history_df = get_stock_history_baostock(symbol, start_date, end_date)
         fin_data = get_full_financial_data(symbol)
+
+    # 数据加载状态提示
+    if history_df.empty:
+        st.warning(f'未能获取 {stock_name}({symbol}) 的K线数据，请确认股票代码是否正确或稍后重试。')
+    if not fin_data:
+        st.info(f'暂无 {stock_name}({symbol}) 的财务报表数据。')
 
     # 提取价格数据
     if not history_df.empty:
@@ -914,6 +922,7 @@ def main():
         # 估值仪表盘
         upside = advice[2]
         gauge_color = '#2ed573' if upside > 10 else '#ffa502' if upside > -10 else '#ff4757'
+        max_range = max(current_price, fair_price) * 1.5
         fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number+delta",
             value=fair_price,
@@ -921,12 +930,12 @@ def main():
             number={'prefix': '¥', 'font': {'size': 28}},
             title={'text': f"合理估值 (溢价 {upside:+.1f}%)", 'font': {'size': 14}},
             gauge={
-                'axis': {'range': [0, max(current_price, fair_price) * 1.5]},
+                'axis': {'range': [0, max_range]},
                 'bar': {'color': gauge_color, 'thickness': 0.65},
                 'steps': [
-                    {'range': [0, current_price * 0.7], 'color': '#2ed57320'},
-                    {'range': [current_price * 0.7, current_price * 1.3], 'color': '#ffa50220'},
-                    {'range': [current_price * 1.3, max(current_price, fair_price) * 1.5], 'color': '#ff475720'}
+                    {'range': [0, current_price * 0.7], 'color': 'rgba(46,213,115,0.15)'},
+                    {'range': [current_price * 0.7, current_price * 1.3], 'color': 'rgba(255,165,2,0.15)'},
+                    {'range': [current_price * 1.3, max_range], 'color': 'rgba(255,71,87,0.15)'}
                 ],
                 'threshold': {'line': {'color': '#e84393', 'width': 3}, 'thickness': 0.8, 'value': current_price}
             }
