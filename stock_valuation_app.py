@@ -93,7 +93,7 @@ def get_stock_history_baostock(code, start_date, end_date):
         full_code,
         "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ",
         start_date=start_date, end_date=end_date,
-        frequency="d", adjustflag="2"
+        frequency="d", adjustflag="3"
     )
     df = _bs_query(rs)
     bs_logout()
@@ -271,71 +271,317 @@ def create_financial_chart(fin_data):
     fig.update_layout(height=320, template='plotly_white', showlegend=False)
     return fig
 
-# ==================== 报告生成 ====================
+# ==================== 报告生成（研报详细版） ====================
 
-def generate_word_report(code, name, price, valuation, fin_data, rating_info):
+def _add_table(doc, headers, rows):
+    """辅助函数：添加格式化表格到Word文档"""
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    table = doc.add_table(rows=1+len(rows), cols=len(headers))
+    table.style = 'Table Grid'
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    # 表头
+    for i, h in enumerate(headers):
+        cell = table.rows[0].cells[i]
+        cell.text = h
+        for p in cell.paragraphs:
+            p.runs[0].bold = True
+            p.runs[0].font.size = Pt(9)
+            p.runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cell.paragraphs[0].runs[0].font.bold = True
+        shading = cell._element.get_or_add_tcPr()
+        shading.append(parse_xml(r'<w:shd {} w:fill="2B6CB0"/>'.format(nsdecls('w'))))
+    # 数据行
+    for r_idx, row in enumerate(rows):
+        for c_idx, val in enumerate(row):
+            cell = table.rows[r_idx+1].cells[c_idx]
+            cell.text = str(val)
+            for p in cell.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if p.runs:
+                    p.runs[0].font.size = Pt(9)
+    return table
+
+def generate_word_report(code, name, price, valuation, fin_data, rating_info, history_df, pe_low, pe_mid, pe_high, growth, discount, terminal, pb_mult):
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.oxml.ns import nsdecls
+    from docx.oxml import parse_xml
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+
     doc = Document()
-    t = doc.add_heading(f'{name}({code}) 投资价值分析报告', 0)
+    # 封面
+    t = doc.add_heading(f'{name}（{code}）', 0)
     t.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph(f'报告日期: {datetime.now().strftime("%Y-%m-%d")}').alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph()
-    doc.add_heading('投资建议', level=1)
+    t2 = doc.add_heading('投资价值深度分析报告', level=1)
+    t2.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p = doc.add_paragraph()
-    p.add_run(f'评级: {rating_info[0]}').bold = True
-    p.add_run(f'  合理估值: ¥{valuation["fair"]:.2f}  溢价空间: {rating_info[2]:+.1f}%')
-    for r in rating_info[3]:
-        doc.add_paragraph(r, style='List Bullet')
-    doc.add_heading('估值分析', level=1)
-    pe = valuation['pe']
-    doc.add_paragraph(f'PE估值: 悲观¥{pe[0]:.2f} / 基准¥{pe[1]:.2f} / 乐观¥{pe[2]:.2f}')
-    doc.add_paragraph(f'DCF估值: ¥{valuation["dcf"]:.2f}')
-    doc.add_paragraph(f'PB估值: ¥{valuation["pb"]:.2f}')
-    doc.add_paragraph(f'综合估值: ¥{valuation["fair"]:.2f}')
-    if fin_data:
-        doc.add_heading('财务摘要', level=1)
-        dates = sorted(fin_data.keys(), reverse=True)
-        latest = fin_data[dates[0]]
-        doc.add_paragraph(f'EPS: ¥{latest.get("epsTTM",0):.2f}')
-        doc.add_paragraph(f'ROE: {latest.get("roeAvg",0):.2f}%')
-        doc.add_paragraph(f'毛利率: {latest.get("gpMargin",0):.2f}%')
-        doc.add_paragraph(f'净利率: {latest.get("npMargin",0):.2f}%')
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run(f'报告日期：{datetime.now().strftime("%Y年%m月%d日")}').font.size = Pt(11)
     doc.add_paragraph()
-    doc.add_paragraph('免责声明: 本报告基于公开数据生成，仅供参考，不构成投资建议。')
+
+    # 一、核心观点
+    doc.add_heading('一、核心观点', level=1)
+    rating = rating_info[0]
+    upside = rating_info[2]
+    p = doc.add_paragraph()
+    p.add_run(f'投资评级：{rating}').bold = True
+    p.add_run(f'  |  当前股价：¥{price:.2f}  |  合理估值：¥{valuation["fair"]:.2f}  |  溢价空间：{upside:+.1f}%')
+    doc.add_paragraph()
+    doc.add_heading('评级理由：', level=2)
+    for reason in rating_info[3]:
+        doc.add_paragraph(reason, style='List Bullet')
+    doc.add_paragraph()
+
+    # 二、盈利预测与估值
+    doc.add_heading('二、盈利预测与估值', level=1)
+    dates = sorted(fin_data.keys())
+    headers = ['单位：百万元'] + [d[:4] for d in dates]
+    if len(dates) < 4:
+        headers += ['预测'] * (4 - len(dates))
+    # 营收
+    rev_rows = ['营业收入']
+    rev_growth = ['年增长率（%）']
+    np_rows = ['归母净利润']
+    np_growth = ['年增长率（%）']
+    eps_rows = ['每股收益（元）']
+    pe_rows = ['市盈率（X）']
+    roe_rows = ['净资产收益率（%）']
+    for d in dates:
+        fd = fin_data[d]
+        rev = fd.get('MBRevenue', 0)
+        np_v = fd.get('netProfit', 0)
+        eps_v = fd.get('epsTTM', 0)
+        roe_v = fd.get('roeAvg', 0)
+        rev_rows.append(f'{rev/1e6:.0f}' if rev and rev == rev else '-')
+        np_rows.append(f'{np_v/1e6:.0f}' if np_v and np_v == np_v else '-')
+        eps_rows.append(f'{eps_v:.2f}' if eps_v and eps_v == eps_v else '-')
+        pe_rows.append(f'{price/eps_v:.1f}' if eps_v > 0 else '-')
+        roe_rows.append(f'{roe_v:.1f}' if roe_v and roe_v == roe_v else '-')
+    # 填充预测行
+    latest = fin_data.get(dates[-1], {}) if dates else {}
+    eps = latest.get('epsTTM', 0)
+    np_v = latest.get('netProfit', 0)
+    for _ in range(4 - len(dates)):
+        rev_rows.append('-')
+        np_rows.append('-')
+        eps_rows.append(f'{eps*(1+growth):.2f}' if eps > 0 else '-')
+        pe_rows.append(f'{price/(eps*(1+growth)):.1f}' if eps > 0 else '-')
+        roe_rows.append('-')
+    _add_table(doc, headers, [rev_rows, np_rows, eps_rows, pe_rows, roe_rows])
+    doc.add_paragraph()
+
+    # 三、估值分析
+    doc.add_heading('三、估值分析', level=1)
+    pe = valuation['pe']
+    doc.add_paragraph(f'我们采用PE市盈率法、DCF现金流折现法和PB市净率法三种估值方法对{name}进行综合分析。')
+    doc.add_paragraph()
+    doc.add_heading('3.1 PE市盈率估值', level=2)
+    doc.add_paragraph(f'基于EPS（TTM）¥{eps:.2f}，分别给予悲观{pe_low}x、基准{pe_mid}x、乐观{pe_high}x的PE倍数，得到：')
+    doc.add_paragraph(f'  悲观估值：¥{pe[0]:.2f}  |  基准估值：¥{pe[1]:.2f}  |  乐观估值：¥{pe[2]:.2f}')
+    doc.add_paragraph()
+    doc.add_heading('3.2 DCF现金流折现估值', level=2)
+    doc.add_paragraph(f'假设未来10年自由现金流折现，预期增长率{growth*100:.0f}%，折现率{discount*100:.0f}%，永续增长率{terminal*100:.0f}%。')
+    doc.add_paragraph(f'  DCF估值：¥{valuation["dcf"]:.2f}')
+    doc.add_paragraph()
+    doc.add_heading('3.3 PB市净率估值', level=2)
+    bvps = price / (history_df['pbMRQ'].iloc[-1] if not history_df.empty and pd.notna(history_df['pbMRQ'].iloc[-1]) else 1)
+    doc.add_paragraph(f'基于每股净资产¥{bvps:.2f}，给予{pb_mult}x PB倍数。')
+    doc.add_paragraph(f'  PB估值：¥{valuation["pb"]:.2f}')
+    doc.add_paragraph()
+    doc.add_heading('3.4 综合估值', level=2)
+    doc.add_paragraph(f'综合PE（40%权重）+ DCF（30%权重）+ PB（30%权重），得出合理估值：')
+    p = doc.add_paragraph()
+    p.add_run(f'  综合合理估值：¥{valuation["fair"]:.2f}').bold = True
+    p.add_run(f'  （较当前股价{upside:+.1f}%）')
+    doc.add_paragraph()
+
+    # 四、主要财务指标
+    doc.add_heading('四、主要财务指标', level=1)
+    if fin_data:
+        headers2 = ['指标'] + [d[:4] for d in dates]
+        gp_rows = ['毛利率（%）']
+        np_margin_rows = ['净利率（%）']
+        debt_rows = ['资产负债率（%）']
+        yoy_rows = ['净利润增速（%）']
+        for d in dates:
+            fd = fin_data[d]
+            gp_rows.append(f'{fd.get("gpMargin",0):.1f}' if fd.get("gpMargin") and fd.get("gpMargin") == fd.get("gpMargin") else '-')
+            np_margin_rows.append(f'{fd.get("npMargin",0):.1f}' if fd.get("npMargin") and fd.get("npMargin") == fd.get("npMargin") else '-')
+            debt_rows.append(f'{fd.get("debtToAssets",0):.1f}' if fd.get("debtToAssets") and fd.get("debtToAssets") == fd.get("debtToAssets") else '-')
+            yoy_rows.append(f'{fd.get("YOYNP",0):.1f}' if fd.get("YOYNP") and fd.get("YOYNP") == fd.get("YOYNP") else '-')
+        _add_table(doc, headers2, [gp_rows, np_margin_rows, debt_rows, yoy_rows])
+    doc.add_paragraph()
+
+    # 五、风险提示
+    doc.add_heading('五、风险提示', level=1)
+    risks = []
+    latest_pe = history_df['peTTM'].iloc[-1] if not history_df.empty and pd.notna(history_df['peTTM'].iloc[-1]) else 0
+    if latest_pe > 60:
+        risks.append("当前估值偏高，需警惕估值回调风险")
+    debt_ratio = latest.get('debtToAssets', 0) if latest else 0
+    if debt_ratio > 60:
+        risks.append("资产负债率较高，存在偿债压力")
+    yoy_np = latest.get('YOYNP', 0) if latest else 0
+    if yoy_np and yoy_np < 0:
+        risks.append("净利润同比下降，关注盈利持续性")
+    if not risks:
+        risks = ["行业竞争加剧风险", "宏观经济波动风险", "政策变化风险", "汇率波动风险"]
+    for r in risks:
+        doc.add_paragraph(r, style='List Bullet')
+    doc.add_paragraph()
+
+    # 免责声明
+    doc.add_heading('免责声明', level=1)
+    doc.add_paragraph('本报告基于Baostock公开财务数据及市场信息生成，采用PE市盈率法、DCF现金流折现法和PB市净率法进行估值分析。报告中的预测和估值基于当前可获取的数据和假设，未来实际业绩可能与预测存在差异。')
+    doc.add_paragraph('本报告仅供参考研究使用，不构成任何投资建议。投资者应根据自身风险承受能力和投资目标独立做出投资决策。股市有风险，投资需谨慎。')
+    doc.add_paragraph()
+    doc.add_paragraph(f'报告生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M")}')
+
     doc_io = io.BytesIO()
     doc.save(doc_io)
     doc_io.seek(0)
     return doc_io
 
-def generate_pdf_report(code, name, price, valuation, rating_info):
+def generate_pdf_report(code, name, price, valuation, rating_info, fin_data, history_df, pe_low, pe_mid, pe_high, growth, discount, terminal, pb_mult):
     pdf_io = io.BytesIO()
-    doc = SimpleDocTemplate(pdf_io, pagesize=A4, topMargin=50, bottomMargin=50)
+    doc = SimpleDocTemplate(pdf_io, pagesize=A4, topMargin=50, bottomMargin=50, leftMargin=50, rightMargin=50)
     styles = getSampleStyleSheet()
+
+    h1 = ParagraphStyle('H1', parent=styles['Heading1'], fontSize=16, textColor=rl_colors.HexColor('#1a365d'),
+                        spaceBefore=18, spaceAfter=8, fontName='Helvetica-Bold')
+    h2 = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=12, textColor=rl_colors.HexColor('#2b6cb0'),
+                        spaceBefore=12, spaceAfter=4, fontName='Helvetica-Bold')
+    body = ParagraphStyle('Body', parent=styles['Normal'], fontSize=10, leading=16, spaceAfter=6)
+    title = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=22, textColor=rl_colors.HexColor('#1a365d'),
+                           alignment=1, spaceAfter=10, fontName='Helvetica-Bold')
+    subtitle = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=12, textColor=rl_colors.HexColor('#4a5568'),
+                              alignment=1, spaceAfter=20)
+
     story = []
-    ts = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=20,
-                        textColor=rl_colors.HexColor('#1a365d'), alignment=1, spaceAfter=15)
-    story.append(Paragraph(f'{name}({code})', ts))
-    story.append(Paragraph('投资价值分析报告', ts))
+    # 封面
+    story.append(Spacer(1, 40))
+    story.append(Paragraph(f'{name}（{code}）', title))
+    story.append(Paragraph('投资价值深度分析报告', subtitle))
+    story.append(Paragraph(f'报告日期：{datetime.now().strftime("%Y年%m月%d日")}', subtitle))
+    story.append(Spacer(1, 20))
+
+    # 核心观点
+    story.append(Paragraph('一、核心观点', h1))
+    rating = rating_info[0]
+    upside = rating_info[2]
+    story.append(Paragraph(f'<b>投资评级：{rating}</b>  |  当前股价：¥{price:.2f}  |  合理估值：¥{valuation["fair"]:.2f}  |  溢价空间：{upside:+.1f}%', body))
+    story.append(Paragraph('评级理由：', h2))
+    for reason in rating_info[3]:
+        story.append(Paragraph(f'• {reason}', body))
     story.append(Spacer(1, 10))
-    story.append(Paragraph(f'<b>当前股价:</b> ¥{price:.2f}', styles['Normal']))
-    story.append(Paragraph(f'<b>投资评级:</b> {rating_info[0]}  <b>合理估值:</b> ¥{valuation["fair"]:.2f}', styles['Normal']))
-    story.append(Spacer(1, 10))
-    pe = valuation['pe']
-    td = [['估值方法', '悲观', '基准', '乐观']]
-    td.append(['PE估值', f'¥{pe[0]:.2f}', f'¥{pe[1]:.2f}', f'¥{pe[2]:.2f}'])
-    td.append(['DCF估值', '-', f'¥{valuation["dcf"]:.2f}', '-'])
-    td.append(['PB估值', '-', f'¥{valuation["pb"]:.2f}', '-'])
-    td.append(['综合估值', '-', '-', f'¥{valuation["fair"]:.2f}'])
+
+    # 盈利预测表
+    story.append(Paragraph('二、盈利预测与估值', h1))
+    dates = sorted(fin_data.keys())
+    headers = ['单位：百万元'] + [d[:4] for d in dates]
+    if len(dates) < 4:
+        headers += ['预测'] * (4 - len(dates))
+
+    rev_rows = ['营业收入']
+    np_rows = ['归母净利润']
+    eps_rows = ['每股收益（元）']
+    pe_rows = ['市盈率（X）']
+    roe_rows = ['净资产收益率（%）']
+    for d in dates:
+        fd = fin_data[d]
+        rev = fd.get('MBRevenue', 0)
+        np_v = fd.get('netProfit', 0)
+        eps_v = fd.get('epsTTM', 0)
+        roe_v = fd.get('roeAvg', 0)
+        rev_rows.append(f'{rev/1e6:.0f}' if rev and rev == rev else '-')
+        np_rows.append(f'{np_v/1e6:.0f}' if np_v and np_v == np_v else '-')
+        eps_rows.append(f'{eps_v:.2f}' if eps_v and eps_v == eps_v else '-')
+        pe_rows.append(f'{price/eps_v:.1f}' if eps_v > 0 else '-')
+        roe_rows.append(f'{roe_v:.1f}' if roe_v and roe_v == roe_v else '-')
+    latest = fin_data.get(dates[-1], {}) if dates else {}
+    eps = latest.get('epsTTM', 0)
+    for _ in range(4 - len(dates)):
+        rev_rows.append('-'); np_rows.append('-')
+        eps_rows.append(f'{eps*(1+growth):.2f}' if eps > 0 else '-')
+        pe_rows.append(f'{price/(eps*(1+growth)):.1f}' if eps > 0 else '-')
+        roe_rows.append('-')
+
+    td = [headers, rev_rows, np_rows, eps_rows, pe_rows, roe_rows]
     table = Table(td)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), rl_colors.HexColor('#2b6cb0')),
         ('TEXTCOLOR', (0, 0), (-1, 0), rl_colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('GRID', (0, 0), (-1, -1), 0.5, rl_colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor('#f7fafc')])
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor('#f7fafc')]),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
     ]))
     story.append(table)
-    story.append(Spacer(1, 15))
-    story.append(Paragraph('免责声明: 本报告基于公开数据生成，仅供参考。', styles['Normal']))
+    story.append(Spacer(1, 10))
+
+    # 估值分析
+    story.append(Paragraph('三、估值分析', h1))
+    pe = valuation['pe']
+    story.append(Paragraph(f'采用PE市盈率法、DCF现金流折现法和PB市净率法三种方法综合分析。', body))
+    story.append(Paragraph('3.1 PE市盈率估值', h2))
+    story.append(Paragraph(f'基于EPS ¥{eps:.2f}，悲观{pe_low}x→¥{pe[0]:.2f}，基准{pe_mid}x→¥{pe[1]:.2f}，乐观{pe_high}x→¥{pe[2]:.2f}', body))
+    story.append(Paragraph('3.2 DCF现金流折现估值', h2))
+    story.append(Paragraph(f'增长率{growth*100:.0f}%，折现率{discount*100:.0f}%，永续增长{terminal*100:.0f}% → ¥{valuation["dcf"]:.2f}', body))
+    story.append(Paragraph('3.3 PB市净率估值', h2))
+    story.append(Paragraph(f'PB倍数{pb_mult}x → ¥{valuation["pb"]:.2f}', body))
+    story.append(Paragraph('3.4 综合估值', h2))
+    story.append(Paragraph(f'<b>综合合理估值：¥{valuation["fair"]:.2f}</b>（较当前股价{upside:+.1f}%）', body))
+    story.append(Spacer(1, 10))
+
+    # 主要财务指标
+    story.append(Paragraph('四、主要财务指标', h1))
+    if fin_data:
+        headers2 = ['指标'] + [d[:4] for d in dates]
+        gp_rows = ['毛利率（%）']
+        np_margin_rows = ['净利率（%）']
+        debt_rows = ['资产负债率（%）']
+        for d in dates:
+            fd = fin_data[d]
+            gp_rows.append(f'{fd.get("gpMargin",0):.1f}' if fd.get("gpMargin") and fd.get("gpMargin") == fd.get("gpMargin") else '-')
+            np_margin_rows.append(f'{fd.get("npMargin",0):.1f}' if fd.get("npMargin") and fd.get("npMargin") == fd.get("npMargin") else '-')
+            debt_rows.append(f'{fd.get("debtToAssets",0):.1f}' if fd.get("debtToAssets") and fd.get("debtToAssets") == fd.get("debtToAssets") else '-')
+        td2 = [headers2, gp_rows, np_margin_rows, debt_rows]
+        table2 = Table(td2)
+        table2.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), rl_colors.HexColor('#2b6cb0')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), rl_colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.5, rl_colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor('#f7fafc')]),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ]))
+        story.append(table2)
+    story.append(Spacer(1, 10))
+
+    # 风险提示
+    story.append(Paragraph('五、风险提示', h1))
+    risks = []
+    latest_pe = history_df['peTTM'].iloc[-1] if not history_df.empty and pd.notna(history_df['peTTM'].iloc[-1]) else 0
+    if latest_pe > 60: risks.append("当前估值偏高，需警惕估值回调风险")
+    debt_ratio = latest.get('debtToAssets', 0) if latest else 0
+    if debt_ratio > 60: risks.append("资产负债率较高，存在偿债压力")
+    yoy_np = latest.get('YOYNP', 0) if latest else 0
+    if yoy_np and yoy_np < 0: risks.append("净利润同比下降，关注盈利持续性")
+    if not risks: risks = ["行业竞争加剧风险", "宏观经济波动风险", "政策变化风险", "汇率波动风险"]
+    for r in risks:
+        story.append(Paragraph(f'• {r}', body))
+    story.append(Spacer(1, 10))
+
+    # 免责声明
+    story.append(Paragraph('免责声明', h1))
+    story.append(Paragraph('本报告基于Baostock公开财务数据生成，采用PE市盈率法、DCF现金流折现法和PB市净率法进行估值分析。报告中的预测和估值基于当前可获取的数据和假设，未来实际业绩可能与预测存在差异。本报告仅供参考研究使用，不构成任何投资建议。股市有风险，投资需谨慎。', body))
+    story.append(Paragraph(f'报告生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M")}', body))
+
     doc.build(story)
     pdf_io.seek(0)
     return pdf_io
@@ -493,13 +739,37 @@ def main():
     pred_df = pd.DataFrame(pred_rows, columns=['年度', '营收(亿)', '净利润(亿)', 'EPS', 'ROE(%)', '毛利率(%)', '利润增速(%)'])
     st.dataframe(pred_df, use_container_width=True, hide_index=True, height=max(200, 36 * len(pred_rows)))
 
-    # 4. 估值对比
-    st.markdown('<div class="section-title">估值分析</div>', unsafe_allow_html=True)
-    col_v = st.columns(4)
-    col_v[0].metric("PE悲观", f"¥{pe_pessimistic:.2f}", f"PE={pe_low}x")
-    col_v[1].metric("PE基准", f"¥{pe_base:.2f}", f"PE={pe_mid}x")
-    col_v[2].metric("PE乐观", f"¥{pe_optimistic:.2f}", f"PE={pe_high}x")
-    col_v[3].metric("综合估值", f"¥{fair_price:.2f}", f"PE40%+DCF30%+PB30%")
+    # 4. 未来股价预测（醒目展示）
+    st.markdown('<div class="section-title">未来股价预测</div>', unsafe_allow_html=True)
+    pred_col1, pred_col2, pred_col3, pred_col4 = st.columns(4)
+    pred_col1.metric("悲观情景", f"¥{pe_pessimistic:.2f}", f"PE={pe_low}x")
+    pred_col2.metric("基准情景", f"¥{pe_base:.2f}", f"PE={pe_mid}x")
+    pred_col3.metric("乐观情景", f"¥{pe_optimistic:.2f}", f"PE={pe_high}x")
+    pred_col4.metric("综合估值", f"¥{fair_price:.2f}", f"PE40%+DCF30%+PB30%")
+
+    # 未来股价预测表
+    future_prices = []
+    for year_offset in [1, 2, 3]:
+        future_eps = eps * ((1 + growth) ** year_offset) if eps > 0 else 0
+        future_pe = pe_mid
+        future_price_pe = future_eps * future_pe
+        future_price_dcf = dcf_val * (1 + growth * year_offset * 0.3)
+        future_price_pb = pb_val * (1 + growth * year_offset * 0.2)
+        future_fair = future_price_pe * 0.4 + future_price_dcf * 0.3 + future_price_pb * 0.3
+        future_prices.append({
+            '预测年度': f'{datetime.now().year + year_offset}E',
+            '预测EPS': f'¥{future_eps:.2f}',
+            'PE估值': f'¥{future_price_pe:.2f}',
+            'DCF估值': f'¥{future_price_dcf:.2f}',
+            'PB估值': f'¥{future_price_pb:.2f}',
+            '综合估值': f'¥{future_fair:.2f}',
+            '较当前价': f"{((future_fair/current_price-1)*100):+.1f}%" if current_price > 0 else "-"
+        })
+    future_df = pd.DataFrame(future_prices)
+    st.dataframe(future_df, use_container_width=True, hide_index=True, height=150)
+
+    # 5. 估值方法对比
+    st.markdown('<div class="section-title">估值方法对比</div>', unsafe_allow_html=True)
 
     # 估值方法对比表
     val_table = pd.DataFrame({
@@ -569,13 +839,13 @@ def main():
     st.markdown("---")
     col_dl = st.columns(2)
     with col_dl[0]:
-        word_file = generate_word_report(symbol, stock_name, current_price, valuation, fin_data, rating_info)
+        word_file = generate_word_report(symbol, stock_name, current_price, valuation, fin_data, rating_info, history_df, pe_low, pe_mid, pe_high, growth, discount, terminal, pb_mult)
         st.download_button(label="下载 Word 报告", data=word_file,
                            file_name=f"{stock_name}_{symbol}_估值报告.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                            use_container_width=True)
     with col_dl[1]:
-        pdf_file = generate_pdf_report(symbol, stock_name, current_price, valuation, rating_info)
+        pdf_file = generate_pdf_report(symbol, stock_name, current_price, valuation, rating_info, fin_data, history_df, pe_low, pe_mid, pe_high, growth, discount, terminal, pb_mult)
         st.download_button(label="下载 PDF 报告", data=pdf_file,
                            file_name=f"{stock_name}_{symbol}_估值报告.pdf",
                            mime="application/pdf", use_container_width=True)
