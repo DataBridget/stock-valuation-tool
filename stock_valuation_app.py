@@ -210,7 +210,7 @@ def calculate_pe_valuation(eps, pe_low, pe_mid, pe_high):
         return 0, 0, 0
     return eps * pe_low, eps * pe_mid, eps * pe_high
 
-def calculate_dcf_valuation(net_profit, revenue, eps, growth_rate, discount_rate, terminal_growth):
+def calculate_dcf_valuation(net_profit, revenue, eps, growth_rate, discount_rate, terminal_growth, pe_ttm=30):
     if net_profit <= 0 or revenue <= 0 or eps <= 0:
         return 0
     fcf = net_profit * 0.7
@@ -224,9 +224,9 @@ def calculate_dcf_valuation(net_profit, revenue, eps, growth_rate, discount_rate
     pv_terminal = terminal / ((1 + discount_rate) ** 10)
     total_shares = max(revenue / (eps * 10000), 1) if eps > 0 and revenue > 0 else 1e8
     dcf_value = (pv_fcf + pv_terminal) / total_shares
-    # 限制DCF估值在合理范围（不超过PE基准估值的2倍）
-    pe_base_value = eps * 20
-    return min(dcf_value, pe_base_value * 2) if pe_base_value > 0 else dcf_value
+    # 限制DCF估值在合理范围（不超过PE基准估值的3倍，基准随行业PE动态调整）
+    pe_base_value = eps * max(pe_ttm * 0.7, 30) if eps > 0 else 0
+    return min(dcf_value, pe_base_value * 3) if pe_base_value > 0 else dcf_value
 
 def calculate_pb_valuation(bvps, pb_mult):
     return bvps * pb_mult if bvps > 0 else 0
@@ -729,6 +729,9 @@ def main():
         # 半导体/芯片/AI/科技
         elif any(k in name for k in ['半导体', '芯片', '集成电路', '电子', '科技', '软件', '人工智能', 'AI', '中芯', '北方华创', '中微', '拓荆', '盛美', '华海清科', '芯源微', '微导纳米', '至纯', '富创', '江丰', '正帆', '新莱', '英杰', '汉钟', '中科', '寒武纪', '海光', '龙芯', '景嘉微', '兆易', '韦尔', '卓胜微', '圣邦', '思瑞浦', '艾为', '纳芯微', '晶晨', '瑞芯微', '全志', '恒玄', '乐鑫', '博通', '翱捷', '中科蓝讯', '炬芯', '峰岹', '芯海', '国民技术', '国科微', '欧比特', '复旦微电', '紫光国微', '振芯科技', '华力创通', '北斗星通', '合众思壮', '华测导航', '中海达', '四维图新', '高德红外', '大立科技', '睿创微纳', '久之洋', '富吉瑞', '东方中科', '普源精电', '鼎阳科技', '坤恒顺维', '思林杰', '优利德', '华盛昌', '聚辰股份', '普冉股份', '东芯股份', '恒烁股份', '佰维存储', '江波龙', '德明利', '朗科科技', '大为股份', '同有科技', '浪潮信息', '中科曙光', '紫光股份', '星网锐捷', '锐捷网络', '菲菱科思', '共进股份', '剑桥科技', '工业富联', '云赛智联', '数据港', '奥飞数据', '光环新网', '宝信软件', '用友网络', '金山办公', '科大讯飞', '汉王科技', '虹软科技', '当虹科技', '格灵深瞳', '云从科技', '云天励飞', '商汤', '旷视', '依图', '地平线', '黑芝麻', '芯原股份', '安路科技', '复旦微电', '紫光国微', '国民技术', '国科微', '欧比特', '上海贝岭', '士兰微', '华润微', '捷捷微电', '扬杰科技', '斯达半导', '时代电气', '宏微科技', '新洁能', '东微半导', '锴威特', '台基股份', '华微电子', '立昂微', '中晶科技', '欧陆通', '可立克', '京泉华', '伊戈尔', '麦格米特', '英搏尔', '汇川技术', '信捷电气', '雷赛智能', '埃斯顿', '机器人', '绿的谐波', '双环传动', '中大力德', '昊志机电', '禾川科技', '步科股份', '鸣志电器', '江苏雷利', '鼎智科技', '伟创电气', '正弦电气', '众辰科技', '儒竞科技', '三花智控', '拓普集团', '银轮股份', '飞龙股份', '盾安环境', '海信家电', '美的集团', '格力电器', '海尔智家', '老板电器', '华帝股份', '火星人', '浙江美大', '亿田智能', '帅丰电器', '苏泊尔', '九阳股份', '新宝股份', '小熊电器', '北鼎股份', '比依股份', '德昌股份', '春光科技', '富佳股份', '莱克电气', '科沃斯', '石头科技', '极米科技', '光峰科技', '海信视像', 'TCL科技', '创维数字', '四川长虹', '康冠科技', '视源股份', '鸿合科技', '宸展光电', '伟时电子', '隆利科技', '聚飞光电', '瑞丰光电', '鸿利智汇', '国星光电', '木林森', '三安光电', '华灿光电', '乾照光电', '聚灿光电', '蔚蓝锂芯', '兆驰股份', '洲明科技', '利亚德', '艾比森', '奥拓电子', '雷曼光电', '联建光电', '深天马A', '京东方A', 'TCL科技', '维信诺', '和辉光电', '龙腾光电', '彩虹股份', '东旭光电', '诚志股份', '飞凯材料', '江化微', '晶瑞电材', '南大光电', '上海新阳', '雅克科技', '鼎龙股份', '安集科技', '强力新材', '容大感光', '飞凯材料', '江化微', '晶瑞电材', '南大光电', '上海新阳', '雅克科技', '鼎龙股份', '安集科技', '强力新材', '容大感光']):
             return "科技股", 35, 60, 100, 0.30, 0.10, 0.04, 6.0, "PE为主", 0.6, 0.2, 0.2
+        # 精密设备/专用设备/小盘高PE
+        elif any(k in name for k in ['凯格', '精机', '精测', '精雕', '联得', '智云', '华兴', '科恒', '正业', '劲拓', '集泰', '泰尔', '至纯', '盛美', '北方华创', '中微', '拓荆', '华海清科', '芯源微', '微导纳米', '迈为', '帝尔', '奥特维', '捷佳伟创', '金辰', '先导智能', '赢合', '科恒', '星云', '瀚川', '博众', '赛腾', '拓斯达', '埃斯顿', '汇川', '信捷', '雷赛', '绿的谐波', '禾川', '鸣志', '步科', '鼎智', '伟创', '正弦', '众辰', '儒竞', '凯尔达', '埃夫特', '新松', '拓斯达', '克来机电', '天奇', '华昌达', '巨一科技', '豪森', '迈安德', '杰克', '上工', '标准', '中捷', '宝石', '大族', '锐科', '杰普特', '帝尔', '海目星', '联赢', '逸飞', '铂力特', '华曙', '先临三维', '极光', '铂力特', '铂力特']):
+            return "精密设备", 50, 80, 130, 0.30, 0.10, 0.04, 7.0, "PE为主", 0.6, 0.2, 0.2
         # 高成长型（通用）
         elif pe_ttm > 50 or (yoy_np_val and yoy_np_val > 30):
             return "高成长型", 30, 50, 80, 0.25, 0.10, 0.04, 5.0, "PE为主", 0.5, 0.3, 0.2
@@ -763,7 +766,7 @@ def main():
             pb_mult = st.sidebar.slider("PB倍数", 1.0, 10.0, rec_pb, step=0.1)
 
     pe_pessimistic, pe_base, pe_optimistic = calculate_pe_valuation(eps, pe_low, pe_mid, pe_high)
-    dcf_val = calculate_dcf_valuation(net_profit, revenue, eps, growth, discount, terminal)
+    dcf_val = calculate_dcf_valuation(net_profit, revenue, eps, growth, discount, terminal, latest_pe)
     pb_val = calculate_pb_valuation(bvps, pb_mult)
     fair_price = pe_base * w_pe + dcf_val * w_dcf + pb_val * w_pb
 
