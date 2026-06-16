@@ -186,8 +186,9 @@ def calculate_dcf_valuation(net_profit, revenue, eps, growth_rate, discount_rate
         pv_fcf += current_fcf / ((1 + discount_rate) ** year)
     terminal = current_fcf * (1 + terminal_growth) / (discount_rate - terminal_growth)
     pv_terminal = terminal / ((1 + discount_rate) ** 10)
-    total_shares = revenue / (eps * 10000) if eps > 0 else 1e8
-    return (pv_fcf + pv_terminal) / total_shares
+    total_shares = max(revenue / (eps * 10000), 1) if eps > 0 and revenue > 0 else 1e8
+    dcf_value = (pv_fcf + pv_terminal) / total_shares
+    return min(dcf_value, current_price * 5) if current_price > 0 else dcf_value
 
 def calculate_pb_valuation(bvps, pb_mult):
     return bvps * pb_mult if bvps > 0 else 0
@@ -275,8 +276,10 @@ def create_financial_chart(fin_data):
 
 def _add_table(doc, headers, rows):
     """辅助函数：添加格式化表格到Word文档"""
-    from docx.shared import Pt, RGBColor, Inches
+    from docx.shared import Pt, RGBColor, Inches, Cm
     from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.oxml.ns import nsdecls
+    from docx.oxml import parse_xml
     table = doc.add_table(rows=1+len(rows), cols=len(headers))
     table.style = 'Table Grid'
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -304,10 +307,7 @@ def _add_table(doc, headers, rows):
     return table
 
 def generate_word_report(code, name, price, valuation, fin_data, rating_info, history_df, pe_low, pe_mid, pe_high, growth, discount, terminal, pb_mult):
-    from docx.shared import Pt, RGBColor, Inches
-    from docx.oxml.ns import nsdecls
-    from docx.oxml import parse_xml
-    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.shared import Pt, RGBColor
 
     doc = Document()
     # 封面
