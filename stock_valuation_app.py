@@ -643,18 +643,7 @@ def main():
                     selected_stock = matched.iloc[0]
                     st.success(f"{selected_stock['名称']} ({selected_stock['代码']})")
         st.markdown("---")
-        st.markdown("## 估值参数")
-        pe_low = st.slider("悲观PE", 5, 30, 10)
-        pe_mid = st.slider("基准PE", 10, 50, 20)
-        pe_high = st.slider("乐观PE", 15, 80, 35)
-        st.markdown("---")
-        with st.expander("DCF参数"):
-            growth = st.slider("增长率(%)", -10, 50, 15) / 100
-            discount = st.slider("折现率(%)", 5, 20, 10) / 100
-            terminal = st.slider("永续增长(%)", 0, 8, 3) / 100
-        with st.expander("PB参数"):
-            pb_mult = st.slider("PB倍数", 1.0, 5.0, 2.5, step=0.1)
-        st.caption("数据源: Baostock")
+        st.caption("估值参数将根据股票特征智能推荐，也可手动调整")
 
     # 标题
     st.markdown('<div class="report-title">A股智能估值分析</div>', unsafe_allow_html=True)
@@ -709,7 +698,39 @@ def main():
     debt_ratio = latest_fin.get('debtToAssets', 0)
     yoy_np = latest_fin.get('YOYNP', 0)
 
-    # 估值计算
+    # 智能估值参数推荐
+    def recommend_params(pe_ttm, roe_val, yoy_np_val, gp_val):
+        """根据股票特征推荐估值参数"""
+        if pe_ttm > 50 or (yoy_np_val and yoy_np_val > 30):
+            return "高成长型", 25, 45, 70, 0.30, 0.10, 0.04, 4.0
+        elif pe_ttm < 15 and roe_val > 15:
+            return "价值型", 10, 15, 25, 0.08, 0.08, 0.03, 2.0
+        elif pe_ttm < 25 and (yoy_np_val and yoy_np_val < 10):
+            return "稳健型", 12, 20, 35, 0.12, 0.09, 0.03, 2.5
+        else:
+            return "成长型", 15, 30, 50, 0.20, 0.10, 0.03, 3.0
+
+    stock_type, rec_pe_low, rec_pe_mid, rec_pe_high, rec_growth, rec_discount, rec_terminal, rec_pb = \
+        recommend_params(latest_pe, roe, yoy_np, gp_margin)
+
+    # 估值计算（使用推荐参数或用户自定义参数）
+    use_recommended = st.sidebar.checkbox("使用智能推荐参数", value=True, help=f"根据分析，该股票属于【{stock_type}】")
+    if use_recommended:
+        pe_low, pe_mid, pe_high = rec_pe_low, rec_pe_mid, rec_pe_high
+        growth, discount, terminal, pb_mult = rec_growth, rec_discount, rec_terminal, rec_pb
+        st.sidebar.info(f"已自动匹配【{stock_type}】参数")
+    else:
+        st.sidebar.markdown("## 估值参数")
+        pe_low = st.sidebar.slider("悲观PE", 5, 50, rec_pe_low)
+        pe_mid = st.sidebar.slider("基准PE", 10, 100, rec_pe_mid)
+        pe_high = st.sidebar.slider("乐观PE", 15, 150, rec_pe_high)
+        with st.sidebar.expander("DCF参数"):
+            growth = st.sidebar.slider("增长率(%)", -10, 100, int(rec_growth*100)) / 100
+            discount = st.sidebar.slider("折现率(%)", 5, 20, int(rec_discount*100)) / 100
+            terminal = st.sidebar.slider("永续增长(%)", 0, 8, int(rec_terminal*100)) / 100
+        with st.sidebar.expander("PB参数"):
+            pb_mult = st.sidebar.slider("PB倍数", 1.0, 10.0, rec_pb, step=0.1)
+
     pe_pessimistic, pe_base, pe_optimistic = calculate_pe_valuation(eps, pe_low, pe_mid, pe_high)
     dcf_val = calculate_dcf_valuation(net_profit, revenue, eps, growth, discount, terminal)
     pb_val = calculate_pb_valuation(bvps, pb_mult)
